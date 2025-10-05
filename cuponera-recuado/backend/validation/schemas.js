@@ -18,10 +18,36 @@ const configGeneralSchema = Joi.object({
     numero_acuerdo_base: Joi.string().allow('', null).optional()
 });
 
+const urlOrRelativePathSchema = Joi.string()
+    .allow(null, '')
+    .custom((value, helpers) => {
+        if (value === null || value === '') {
+            return value;
+        }
+
+        if (/^https?:\/\//i.test(value)) {
+            try {
+                new URL(value);
+                return value;
+            } catch (err) {
+                return helpers.error('any.invalid');
+            }
+        }
+
+        if (/^[A-Za-z0-9._~!$&'()*+,;=:@\/?#-]+$/i.test(value) || /^\//.test(value)) {
+            if (/\s/.test(value)) {
+                return helpers.error('any.invalid');
+            }
+            return value;
+        }
+
+        return helpers.error('any.invalid');
+    }, 'URL o ruta relativa');
+
 const configLogosSchema = Joi.object({
-    logo_empresa: Joi.string().allow(null, '').optional(),
-    logo_app: Joi.string().allow(null, '').optional(),
-    logo_login: Joi.string().allow(null, '').optional()
+    logo_empresa: urlOrRelativePathSchema.optional(),
+    logo_app: urlOrRelativePathSchema.optional(),
+    logo_login: urlOrRelativePathSchema.optional()
 });
 
 const cuponCreateSchema = Joi.object({

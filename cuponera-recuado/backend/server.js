@@ -4,6 +4,9 @@ const cors = require('cors');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const { Pool } = require('pg');
+const fs = require('fs');
+const path = require('path');
+const multer = require('multer');
 require('dotenv').config();
 
 const { createValidator } = require('./middleware/validate');
@@ -25,6 +28,38 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'tu_secreto_super_seguro_cambiar_en_produccion';
 
+const LOGO_FIELDS = ['logo_empresa', 'logo_app', 'logo_login'];
+const logosDirectory = path.join(__dirname, 'public', 'logos');
+fs.mkdirSync(logosDirectory, { recursive: true });
+
+const logoStorage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        cb(null, logosDirectory);
+    },
+    filename: (req, file, cb) => {
+        const extension = path.extname(file.originalname).toLowerCase();
+        const baseName = path
+            .basename(file.originalname, extension)
+            .replace(/[^a-zA-Z0-9]+/g, '-')
+            .replace(/^-+|-+$/g, '') || 'logo';
+        const version = Date.now();
+        cb(null, `${baseName}-${version}${extension}`);
+    }
+});
+
+const uploadLogos = multer({
+    storage: logoStorage,
+    fileFilter: (req, file, cb) => {
+        if (!file.mimetype.startsWith('image/')) {
+            return cb(new Error('Solo se permiten archivos de imagen'));
+        }
+        cb(null, true);
+    },
+    limits: {
+        fileSize: 5 * 1024 * 1024
+    }
+});
+
 // Configuración de PostgreSQL
 const pool = new Pool({
     user: process.env.DB_USER || 'postgres',
@@ -36,7 +71,8 @@ const pool = new Pool({
 
 // Middleware
 app.use(cors());
-app.use(express.json({ limit: '50mb' })); // Para logos en base64
+app.use(express.json({ limit: '50mb' }));
+app.use('/logos', express.static(logosDirectory));
 
 // Middleware de autenticación
 const authenticateToken = (req, res, next) => {
@@ -174,26 +210,99 @@ app.put('/api/config/general', authenticateToken, requireAdmin, createValidator(
     }
 });
 
+const uploadLogosMiddleware = (req, res, next) => {
+    const upload = uploadLogos.fields(
+        LOGO_FIELDS.map((field) => ({ name: field, maxCount: 1 }))
+    );
+
+    upload(req, res, (err) => {
+        if (err) {
+            console.error('Error al subir logos:', err);
+            let message = 'Error al subir archivos';
+
+            if (err instanceof multer.MulterError) {
+                if (err.code === 'LIMIT_FILE_SIZE') {
+                    message = 'El archivo supera el tamaño máximo permitido (5 MB)';
+                } else {
+                    message = err.message;
+                }
+            } else if (err.message) {
+                message = err.message;
+            }
+
+            return res.status(400).json({ error: message });
+        }
+        next();
+    });
+};
+
+const normalizeLogosPayload = (req, res, next) => {
+    const files = req.files || {};
+    const payload = {};
+
+    LOGO_FIELDS.forEach((field) => {
+        const file = files[field]?.[0];
+
+        if (file) {
+            payload[field] = `/logos/${file.filename}`;
+            return;
+        }
+
+        const value = req.body?.[field];
+
+        if (typeof value === 'string') {
+            const trimmed = value.trim();
+            const normalized = trimmed.toLowerCase();
+            if (
+                trimmed.length === 0 ||
+                normalized === 'null' ||
+                normalized === 'undefined'
+            ) {
+                payload[field] = null;
+            } else {
+                payload[field] = trimmed;
+            }
+        } else {
+            payload[field] = null;
+        }
+    });
+
+    req.body = payload;
+    next();
+};
+
 // Actualizar logos
-app.put('/api/config/logos', authenticateToken, requireAdmin, createValidator(configLogosSchema), async (req, res) => {
-    try {
-        const { logo_empresa, logo_app, logo_login } = req.body;
+app.put(
+    '/api/config/logos',
+    authenticateToken,
+    requireAdmin,
+    uploadLogosMiddleware,
+    normalizeLogosPayload,
+    createValidator(configLogosSchema),
+    async (req, res) => {
+        try {
+            const { logo_empresa, logo_app, logo_login } = req.body;
 
-        const result = await pool.query(
-            `UPDATE configuracion SET 
-                logo_empresa = COALESCE($1, logo_empresa),
-                logo_app = COALESCE($2, logo_app),
-                logo_login = COALESCE($3, logo_login)
-            WHERE id = 1 RETURNING *`,
-            [logo_empresa, logo_app, logo_login]
-        );
+            const result = await pool.query(
+                `UPDATE configuracion SET
+                    logo_empresa = COALESCE($1, logo_empresa),
+                    logo_app = COALESCE($2, logo_app),
+                    logo_login = COALESCE($3, logo_login)
+                WHERE id = 1 RETURNING *`,
+                [logo_empresa, logo_app, logo_login]
+            );
 
-        res.json(result.rows[0]);
-    } catch (error) {
-        console.error('Error al actualizar logos:', error);
-        res.status(500).json({ error: 'Error interno del servidor' });
+            if (result.rows.length === 0) {
+                return res.status(404).json({ error: 'Configuración no encontrada' });
+            }
+
+            res.json(result.rows[0]);
+        } catch (error) {
+            console.error('Error al actualizar logos:', error);
+            res.status(500).json({ error: 'Error interno del servidor' });
+        }
     }
-});
+);
 
 // ==================== RUTAS DE CUPONES ====================
 
